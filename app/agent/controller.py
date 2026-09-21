@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional
 from app.agent.state import AgentState
 from app.agent.memory import AgentMemory
 from app.agent.planner import Planner
+from app.agent.health import TargetHealthChecker
 from app.tools.executor import ToolExecutor
 from app.knowledge.retriever import KnowledgeRetriever
 from app.flags.detector import FlagDetector
@@ -29,11 +30,42 @@ class AgentController:
         self.knowledge_retriever = KnowledgeRetriever()
         self.flag_detector = FlagDetector()
         self.flag_validator = FlagValidator()
+        self.health_checker = TargetHealthChecker(target_url=target_url)
+
+        # Track repeated actions for intelligent termination
+        self.action_history = {}
+        self.max_repeated_actions = 3
 
     def run(self) -> Dict[str, Any]:
         self.state.mark_running()
         solved = False
         flag = None
+
+        # Preflight health check
+        health_result = self.health_checker.check()
+        if not health_result["reachable"]:
+            self.state.mark_failed()
+            self.memory.add_step(
+                step=0,
+                observation="Target health check failed",
+                knowledge_retrieved=[],
+                hypothesis="Target unavailable",
+                action={"tool": "health_check", "parameters": {}},
+                result=f"Target unreachable: {health_result['error']}",
+                flag_found=False
+            )
+            self.memory.save()
+
+            return {
+                "run_id": self.run_id,
+                "challenge_id": self.challenge_id,
+                "status": self.state.status,
+                "flag": None,
+                "steps": 0,
+                "trajectory": [step.model_dump() for step in self.memory.get_trajectory()],
+                "error": f"Target unreachable: {health_result['error']}",
+                "suggestions": health_result.get("suggestions", [])
+            }
 
         try:
             while not solved and self.state.current_step < settings.max_agent_steps:
@@ -54,6 +86,19 @@ class AgentController:
                     available_tools=self.tool_executor.get_available_tools()
                 )
 
+                # Check for repeated actions
+                action_key = self._get_action_key(action)
+                if action_key in self.action_history:
+                    self.action_history[action_key] += 1
+                    if self.action_history[action_key] > self.max_repeated_actions:
+                        # Too many repeated actions, reconsider
+                        observation = f"Repeated action {action_key} {self.action_history[action_key]} times. Reconsidering approach."
+                        self.state.add_observation(observation)
+                        self.action_history[action_key] = 0  # Reset
+                        continue
+                else:
+                    self.action_history[action_key] = 1
+
                 # Execute action
                 result = self.tool_executor.execute(
                     tool_name=action["action"],
@@ -67,7 +112,11 @@ class AgentController:
                 self.state.increment_step()
 
                 # Detect flag
+                # Try to detect from both output and structured data
                 flag = self.flag_detector.detect(result["output"])
+                if not flag and "structured" in result:
+                    flag = self.flag_detector.detect(result["structured"])
+
                 if flag:
                     self.state.add_candidate_flag(flag)
 
@@ -115,3 +164,11 @@ class AgentController:
             return f"Starting challenge {self.challenge_id} at {self.target_url}"
         else:
             return f"Step {self.state.current_step}: {len(self.state.observations)} observations, {len(self.state.hypotheses)} hypotheses"
+
+    def _get_action_key(self, action: Dict[str, Any]) -> str:
+        """Create a key for tracking repeated actions"""
+        tool = action.get("action", "")
+        params = action.get("parameters", {})
+        # Create a simple key based on tool and main parameters
+        param_str = str(sorted(params.items())) if params else ""
+        return f"{tool}:{param_str[:50]}"  # Limit to prevent memory issues

@@ -1,11 +1,15 @@
+"""
+Local development server that simulates the demo challenge without Docker.
+This allows testing the agent when Docker is not available.
+"""
 from flask import Flask, request, render_template_string, jsonify
 import sqlite3
 import os
 
 app = Flask(__name__)
 
-# Read the flag
-FLAG = open('/flag.txt').read().strip()
+# Read or create flag
+FLAG = "CTF{demo_sql_injection_flag_12345}"
 
 # Simple vulnerable login page
 LOGIN_TEMPLATE = """
@@ -140,4 +144,6 @@ def health():
 if __name__ == '__main__':
     # Initialize database on startup
     init_db()
+    print("Starting local demo challenge server on http://localhost:8000")
+    print("Press Ctrl+C to stop")
     app.run(host='0.0.0.0', port=8000, debug=False)

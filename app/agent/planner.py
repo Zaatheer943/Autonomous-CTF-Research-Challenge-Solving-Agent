@@ -1,4 +1,5 @@
 from typing import List, Dict, Any, Optional
+import json
 import sys
 import os
 
@@ -35,11 +36,13 @@ Use retrieved writeups as evidence and examples, not as ground truth.
 When a candidate flag is found, verify it before reporting success.
 
 Provide your response in the following structured format:
-hypothesis: [your current hypothesis about the challenge]
-reason: [your reasoning for the next action]
+hypothesis: [your current hypothesis about the challenge in one sentence]
+reason: [your reasoning for the next action in one sentence]
 action: [the tool you want to use]
 parameters: [JSON object with tool parameters]
-next_step: [what you plan to do after this action]"""
+next_step: [what you plan to do after this action in one sentence]
+
+Keep your responses concise and structured."""
 
     def choose_action(
         self,
@@ -77,8 +80,17 @@ next_step: [what you plan to do after this action]"""
             "next_step": ""
         }
 
-        if response["content"]:
-            # Parse structured content
+        # First, try to get action from tool_calls
+        if response.get("tool_calls") and len(response["tool_calls"]) > 0:
+            tool_call = response["tool_calls"][0]
+            result["action"] = tool_call["function"]["name"]
+            try:
+                result["parameters"] = json.loads(tool_call["function"]["arguments"])
+            except:
+                result["parameters"] = {}
+
+        # Then parse content for reasoning
+        if response.get("content"):
             content = response["content"]
             for line in content.split("\n"):
                 if line.startswith("hypothesis:"):
@@ -86,26 +98,25 @@ next_step: [what you plan to do after this action]"""
                 elif line.startswith("reason:"):
                     result["reason"] = line.replace("reason:", "").strip()
                 elif line.startswith("action:"):
-                    result["action"] = line.replace("action:", "").strip()
+                    if not result["action"]:  # Only set if not already set from tool_calls
+                        result["action"] = line.replace("action:", "").strip()
                 elif line.startswith("parameters:"):
-                    params_str = line.replace("parameters:", "").strip()
-                    try:
-                        import json
-                        result["parameters"] = json.loads(params_str)
-                    except:
-                        result["parameters"] = {}
+                    if not result["parameters"]:  # Only set if not already set from tool_calls
+                        params_str = line.replace("parameters:", "").strip()
+                        try:
+                            result["parameters"] = json.loads(params_str)
+                        except:
+                            result["parameters"] = {}
                 elif line.startswith("next_step:"):
                     result["next_step"] = line.replace("next_step:", "").strip()
 
-        # If tool calls were made, use them
-        if response["tool_calls"]:
-            tool_call = response["tool_calls"][0]
-            result["action"] = tool_call["function"]["name"]
-            try:
-                import json
-                result["parameters"] = json.loads(tool_call["function"]["arguments"])
-            except:
-                result["parameters"] = {}
+        # Fill in missing reasoning if needed
+        if not result["hypothesis"]:
+            result["hypothesis"] = "Analyzing current evidence to form hypothesis"
+        if not result["reason"]:
+            result["reason"] = "Executing next action based on current analysis"
+        if not result["next_step"]:
+            result["next_step"] = "Analyze result and update approach"
 
         return result
 
@@ -124,12 +135,12 @@ Current State:
 
 Recent Observations:
 """
-        for obs in state.observations[-5:]:
+        for obs in state.observations[-3:]:
             prompt += f"- {obs}\n"
 
         if knowledge:
             prompt += f"\nRelevant Knowledge from Writeups:\n"
-            for k in knowledge[:3]:
-                prompt += f"- {k}\n"
+            for k in knowledge[:2]:  # Limit to top 2 for conciseness
+                prompt += f"- {k[:300]}...\n"  # Truncate for brevity
 
         return prompt

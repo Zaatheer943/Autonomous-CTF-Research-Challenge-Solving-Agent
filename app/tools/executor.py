@@ -36,9 +36,11 @@ class ToolExecutor:
         tool = self.tools[tool_name]
         result: ToolResult = tool.execute(parameters)
 
+        # Return structured data instead of string representation
         return {
             "success": result.success,
-            "output": result.output,
+            "output": result.output if isinstance(result.output, str) else str(result.output),
             "error": result.error,
-            "metadata": result.metadata
+            "metadata": result.metadata,
+            "structured": result.metadata  # Include structured data
         }

@@ -1,5 +1,6 @@
 import httpx
-from typing import Dict, Any
+from typing import Dict, Any, List
+import re
 import sys
 import os
 import ipaddress
@@ -68,27 +69,45 @@ class HTTPTool(BaseTool):
             data = parameters.get("data")
             params = parameters.get("params")
 
+            # Handle form data - if data is a string, try to parse it
+            if data and isinstance(data, str):
+                # Try to parse as form data
+                if '=' in data:
+                    try:
+                        parsed_data = {}
+                        for pair in data.split('&'):
+                            if '=' in pair:
+                                key, value = pair.split('=', 1)
+                                parsed_data[key] = value
+                        data = parsed_data
+                    except:
+                        pass  # Keep as string if parsing fails
+
             with httpx.Client(timeout=settings.tool_timeout) as client:
                 response = client.request(
                     method=method,
                     url=url,
                     headers=headers,
-                    content=data,
+                    data=data,
                     params=params
                 )
 
-            output = f"Status: {response.status_code}\n"
-            output += f"Headers: {dict(response.headers)}\n"
-            output += f"Body: {response.text[:1000]}"
+            # Extract structured information from response
+            structured_response = self._extract_structured_info(response)
+
+            output = {
+                "status_code": response.status_code,
+                "url": str(response.url),
+                "headers": dict(response.headers),
+                "content_type": response.headers.get("content-type", ""),
+                "structured": structured_response,
+                "body": response.text
+            }
 
             return ToolResult(
                 success=True,
-                output=output,
-                metadata={
-                    "status_code": response.status_code,
-                    "headers": dict(response.headers),
-                    "url": str(response.url)
-                }
+                output=str(output),
+                metadata=output
             )
 
         except Exception as e:
@@ -97,6 +116,68 @@ class HTTPTool(BaseTool):
                 output="",
                 error=str(e)
             )
+
+    def _extract_structured_info(self, response) -> Dict[str, Any]:
+        """Extract structured information from HTTP response"""
+        content_type = response.headers.get("content-type", "")
+        body = response.text
+
+        structured = {
+            "links": self._extract_links(body),
+            "forms": self._extract_forms(body),
+            "text_content": body[:1000] if len(body) > 1000 else body,
+            "potential_inputs": self._extract_input_fields(body),
+            "has_login_form": self._has_login_form(body),
+            "title": self._extract_title(body)
+        }
+
+        return structured
+
+    def _extract_links(self, html: str) -> List[str]:
+        """Extract links from HTML"""
+        link_pattern = r'href=["\']([^"\']+)["\']'
+        links = re.findall(link_pattern, html, re.IGNORECASE)
+        # Filter out javascript links and anchors
+        return [link for link in links if not link.startswith('javascript:') and not link.startswith('#')]
+
+    def _extract_forms(self, html: str) -> List[Dict[str, Any]]:
+        """Extract forms from HTML"""
+        forms = []
+        form_pattern = r'<form[^>]*action=["\']([^"\']*)["\'][^>]*method=["\']([^"\']*)["\'][^>]*>(.*?)</form>'
+        form_matches = re.findall(form_pattern, html, re.IGNORECASE | re.DOTALL)
+
+        for action, method, form_content in form_matches:
+            fields = self._extract_input_fields(form_content)
+            forms.append({
+                "action": action,
+                "method": method.upper(),
+                "fields": fields
+            })
+
+        return forms
+
+    def _extract_input_fields(self, html: str) -> List[str]:
+        """Extract input field names from HTML"""
+        input_pattern = r'<input[^>]*name=["\']([^"\']+)["\']'
+        return re.findall(input_pattern, html, re.IGNORECASE)
+
+    def _has_login_form(self, html: str) -> bool:
+        """Check if the page has a login form"""
+        login_indicators = [
+            r'username',
+            r'password',
+            r'login',
+            r'signin',
+            r'auth'
+        ]
+        html_lower = html.lower()
+        return any(re.search(indicator, html_lower) for indicator in login_indicators)
+
+    def _extract_title(self, html: str) -> str:
+        """Extract page title"""
+        title_pattern = r'<title>(.*?)</title>'
+        match = re.search(title_pattern, html, re.IGNORECASE)
+        return match.group(1) if match else ""
 
     def _is_url_allowed(self, url: str) -> bool:
         # If relative URL, it's allowed
